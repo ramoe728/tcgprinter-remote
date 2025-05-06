@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "firebase": "^11.6.1"
+  },
+  "engines": {
+    "node": "22"
+  }
+}
