@@ -10,37 +10,26 @@
 const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
-
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
-
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
 
-// Initialize Firebase Admin with proper configuration for emulators
-// No need to specify service account when using emulators
-admin.initializeApp();
-
-// // Initialize Firebase Admin with explicit configuration for emulators
-// admin.initializeApp({
-//     projectId: 'demo-tcgprinter-remote-server', // Use your project ID here or any placeholder
-// });
-
-// // Connect to the Firestore emulator if running locally
-// if (process.env.FUNCTIONS_EMULATOR) {
-//     const firestore = admin.firestore();
-//     firestore.settings({
-//         host: 'localhost:8089',
-//         ssl: false,
-//     });
-//     console.log('Using Firestore emulator at localhost:8089');
-// }
+// Initialize Firebase Admin with proper configuration
+if (process.env.FUNCTIONS_EMULATOR) {
+    // Local development with emulators
+    admin.initializeApp();
+    console.log('Using Firebase emulators');
+} else {
+    // Production environment
+    const serviceAccount = require('./config/serviceAccountKey.json');
+    console.log('Service Account Project ID:', serviceAccount.project_id);
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.project_id
+    });
+    console.log('Using production Firebase environment');
+}
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -84,7 +73,12 @@ app.post("/signup", async (req, res) => {
             });
             console.log("User data written to Firestore successfully");
         } catch (firestoreError) {
-            console.error("Firestore error:", firestoreError);
+            console.error("Firestore error details:", {
+                message: firestoreError.message,
+                code: firestoreError.code,
+                stack: firestoreError.stack,
+                projectId: admin.app().options.projectId
+            });
             // Even if Firestore fails, we still created the user in Auth
             return res.status(201).json({
                 message: "User created but profile data could not be saved",
