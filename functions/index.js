@@ -139,22 +139,6 @@ app.post("/login", authenticate, async (req, res) => {
     }
 });
 
-app.get("/profile", authenticate, async (req, res) => {
-    try {
-        const userDoc = await admin
-            .firestore()
-            .collection("users")
-            .doc(req.user.uid)
-            .get();
-        if (!userDoc.exists) {
-            return res.status(404).json({ error: "User not found" });
-        }
-        res.json(userDoc.data());
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // Endpoint to save order data with image pairs and image data
 app.post("/save-order", authenticate, async (req, res) => {
     try {
