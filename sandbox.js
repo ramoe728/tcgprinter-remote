@@ -33,7 +33,8 @@ async function getIdToken(email, password) {
 
         // Get the authenticated user
         const user = userCredential.user;
-
+        // console.log("USER", user);
+        console.log("uid", user.uid);
         // Get the ID token
         const idToken = await user.getIdToken();
 
