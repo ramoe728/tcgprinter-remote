@@ -116,27 +116,12 @@ const authenticate = async (req, res, next) => {
     }
 };
 
-// Login endpoint (verifies token and returns user info)
-app.post("/login", authenticate, async (req, res) => {
-    // res.json({
-    //     message: "User authenticated",
-    //     uid: req.user.uid,
-    //     email: req.user.email,
-    // });
-
-    try {
-        const userDoc = await admin
-            .firestore()
-            .collection("users")
-            .doc(req.user.uid)
-            .get();
-        if (!userDoc.exists) {
-            return res.status(404).json({ error: "User not found" });
-        }
-        res.json(userDoc.data());
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+// Validate token
+app.post("/validate-token", authenticate, async (req, res) => {
+    res.json({
+        message: "Token validated",
+        uid: req.user.uid
+    });
 });
 
 // Endpoint to save order data with image pairs and image data
