@@ -518,45 +518,45 @@ app.get("/print-order/:orderId", authenticate, async (req, res) => {
     }
 });
 
-// Background function to update queue positions and process the queue
-// This runs on a schedule (every minute) to keep the queue updated
-exports.updateQueuePositions = functions.pubsub
-    .schedule('every 1 minutes')
-    .onRun(async (context) => {
-        try {
-            console.log('Running queue position update job');
+// // Background function to update queue positions and process the queue
+// // This runs on a schedule (every minute) to keep the queue updated
+// exports.updateQueuePositions = functions.pubsub
+//     .schedule('every 1 minutes')
+//     .onRun(async (context) => {
+//         try {
+//             console.log('Running queue position update job');
 
-            // Get all pending queue items, ordered by priority (high to low) then creation time
-            const queueSnapshot = await admin
-                .firestore()
-                .collection('print-queue')
-                .where('status', 'in', ['pending', 'ready'])
-                .orderBy('priority', 'desc')  // Higher priority first
-                .orderBy('createdAt', 'asc')  // Then first come, first served
-                .get();
+//             // Get all pending queue items, ordered by priority (high to low) then creation time
+//             const queueSnapshot = await admin
+//                 .firestore()
+//                 .collection('print-queue')
+//                 .where('status', 'in', ['pending', 'ready'])
+//                 .orderBy('priority', 'desc')  // Higher priority first
+//                 .orderBy('createdAt', 'asc')  // Then first come, first served
+//                 .get();
 
-            if (queueSnapshot.empty) {
-                console.log('Queue is empty, nothing to update');
-                return null;
-            }
+//             if (queueSnapshot.empty) {
+//                 console.log('Queue is empty, nothing to update');
+//                 return null;
+//             }
 
-            // Update positions in a batch
-            const batch = admin.firestore().batch();
-            let position = 1;
+//             // Update positions in a batch
+//             const batch = admin.firestore().batch();
+//             let position = 1;
 
-            queueSnapshot.forEach(doc => {
-                batch.update(doc.ref, { position: position++ });
-            });
+//             queueSnapshot.forEach(doc => {
+//                 batch.update(doc.ref, { position: position++ });
+//             });
 
-            await batch.commit();
-            console.log(`Updated ${position - 1} queue items with positions`);
+//             await batch.commit();
+//             console.log(`Updated ${position - 1} queue items with positions`);
 
-            return null;
-        } catch (error) {
-            console.error('Error updating queue positions:', error);
-            return null;
-        }
-    });
+//             return null;
+//         } catch (error) {
+//             console.error('Error updating queue positions:', error);
+//             return null;
+//         }
+//     });
 
 // Endpoint for the print service to get the next job in the queue
 app.post("/print-service/next-job", async (req, res) => {
