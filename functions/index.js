@@ -135,10 +135,42 @@ const authenticate = async (req, res, next) => {
     try {
         const decodedToken = await admin.auth().verifyIdToken(idToken);
         req.user = decodedToken;
+
+        // If role requirement is specified, check user's role
+        if (req.requiredRole) {
+            const userDoc = await admin.firestore().collection('users').doc(decodedToken.uid).get();
+            const userData = userDoc.data();
+            const userRole = userData?.role || 'user'; // Default to 'user' if no role specified
+
+            // Define role hierarchy with numeric values (higher = more privileges)
+            const roleHierarchy = {
+                'user': 1,
+                'staff': 2,
+                'admin': 3,
+                'founder': 4
+            };
+
+            // Check if user's role has sufficient privileges
+            if (!roleHierarchy[userRole] || roleHierarchy[userRole] < roleHierarchy[req.requiredRole]) {
+                return res.status(403).json({
+                    error: "Forbidden",
+                    message: `This action requires ${req.requiredRole} role or higher`
+                });
+            }
+        }
+
         next();
     } catch (error) {
         res.status(403).json({ error: "Invalid token" });
     }
+};
+
+// Middleware to require a specific role
+const requireRole = (role) => {
+    return (req, res, next) => {
+        req.requiredRole = role;
+        next();
+    };
 };
 
 // Validate token
@@ -147,175 +179,6 @@ app.post("/validate-token", authenticate, async (req, res) => {
         message: "Token validated",
         uid: req.user.uid
     });
-});
-
-// Endpoint to save order data with image pairs and image data
-app.post("/save-order", authenticate, async (req, res) => {
-    try {
-        const { imagePairs, imageData, orderMetadata } = req.body;
-
-        if (!imagePairs || !Array.isArray(imagePairs) || !imageData || typeof imageData !== 'object') {
-            return res.status(400).json({
-                error: "Invalid request format",
-                details: "Request must include imagePairs array and imageData object"
-            });
-        }
-
-        // Validate that we have the required fields
-        console.log(`Processing order with ${imagePairs.length} image pairs and ${Object.keys(imageData).length} images`);
-
-        // Create a new order document with a generated ID
-        const orderId = req.body.orderId || admin.firestore().collection('orders').doc().id;
-
-        // Create a reference to the order document
-        const orderRef = admin.firestore().collection('orders').doc(orderId);
-
-        // Start a Firestore batch for atomicity
-        const batch = admin.firestore().batch();
-
-        // Save the order metadata
-        batch.set(orderRef, {
-            userId: req.user.uid,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            status: 'pending',
-            imagePairCount: imagePairs.length,
-            imageCount: Object.keys(imageData).length,
-            ...orderMetadata
-        });
-
-        // Save the image pairs in a subcollection (chunking if necessary)
-        const CHUNK_SIZE = 400; // Firestore has a limit of 500 operations per batch
-
-        // Calculate number of chunks needed
-        const chunks = Math.ceil(imagePairs.length / CHUNK_SIZE);
-
-        for (let i = 0; i < chunks; i++) {
-            // Get current chunk of image pairs
-            const chunk = imagePairs.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-
-            // Save this chunk to a subcollection document
-            const pairsDocRef = orderRef.collection('imagePairs').doc(`chunk-${i}`);
-            batch.set(pairsDocRef, {
-                pairs: chunk,
-                chunkIndex: i,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
-
-        // Commit the batch write
-        await batch.commit();
-        console.log(`Saved order metadata and ${imagePairs.length} image pairs in ${chunks} chunks`);
-
-        // Now handle image data - we'll save references in Firestore and actual data in Storage
-        // Initialize storage bucket
-        const bucket = admin.storage().bucket();
-
-        // Track which images we need to save to Storage
-        const imagesToSave = [];
-        const savedImageRefs = {};
-
-        // Process image data (only storing references in Firestore)
-        const imagesBatch = admin.firestore().batch();
-
-        // For each image, prepare it for storage
-        for (const [imageId, imageData] of Object.entries(req.body.imageData)) {
-            // If the imageData is a base64 string or full image data, it needs to go to Storage
-            if (typeof imageData === 'string' && imageData.length > 500) {
-                // This is likely image data that needs to go to Storage
-                imagesToSave.push({
-                    id: imageId,
-                    data: imageData
-                });
-
-                // Store just a reference in Firestore
-                const imageRef = orderRef.collection('images').doc(imageId);
-                imagesBatch.set(imageRef, {
-                    storageRef: `orders/${orderId}/images/${imageId}`,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    userId: req.user.uid
-                });
-            } else {
-                // If it's just metadata or small data, we can store directly in Firestore
-                const imageRef = orderRef.collection('images').doc(imageId);
-                imagesBatch.set(imageRef, {
-                    ...imageData,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    userId: req.user.uid
-                });
-            }
-        }
-
-        // Commit the images batch
-        await imagesBatch.commit();
-        console.log(`Saved ${Object.keys(req.body.imageData).length} image references to Firestore`);
-
-        // Return success early while we continue processing images in the background
-        res.status(201).json({
-            message: "Order saved successfully",
-            orderId,
-            imageCount: Object.keys(req.body.imageData).length,
-            imagePairCount: imagePairs.length
-        });
-
-        // Upload images to Storage in the background (don't wait for completion to respond)
-        // This allows the client to get a quick response while we continue processing
-        if (imagesToSave.length > 0) {
-            console.log(`Starting background upload of ${imagesToSave.length} images to Storage`);
-
-            // Process in series to avoid overwhelming the server
-            for (const image of imagesToSave) {
-                try {
-                    // Determine if it's base64 or some other format
-                    let imageBuffer;
-                    if (image.data.startsWith('data:image')) {
-                        // Handle base64 encoded image
-                        const base64Data = image.data.split(',')[1];
-                        imageBuffer = Buffer.from(base64Data, 'base64');
-                    } else {
-                        // Handle other formats as needed
-                        imageBuffer = Buffer.from(image.data);
-                    }
-
-                    // Create a reference to where the image will be stored
-                    const file = bucket.file(`orders/${orderId}/images/${image.id}`);
-
-                    // Upload the image
-                    await file.save(imageBuffer, {
-                        metadata: {
-                            contentType: 'image/jpeg', // Default to JPEG, adjust as needed
-                            metadata: {
-                                firebaseStorageDownloadTokens: admin.firestore().collection('_').doc().id
-                            }
-                        }
-                    });
-
-                    console.log(`Uploaded image ${image.id} to Storage`);
-                } catch (uploadError) {
-                    console.error(`Error uploading image ${image.id}:`, uploadError);
-                    // We don't throw the error here to allow other images to be processed
-                }
-            }
-
-            console.log(`Completed background upload of ${imagesToSave.length} images to Storage`);
-
-            // Update the order status to reflect that images are processed
-            await orderRef.update({
-                status: 'completed',
-                imageUploadCompleted: true,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
-    } catch (error) {
-        console.error("Error saving order:", error);
-        // If we already sent a response, we can't send another one
-        if (!res.headersSent) {
-            res.status(500).json({
-                error: "Failed to save order",
-                details: error.message
-            });
-        }
-    }
 });
 
 // Add a print job to the queue
@@ -345,9 +208,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
             orderId,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            status: 'pending',
-            imagePairCount: imagePairs.length,
-            estimatedSize: estimatedSizeMB,
+            cardCount: imagePairs.length,
             ...orderMetadata
         });
 
@@ -359,8 +220,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
             userId: req.user.uid,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            status: 'queued',
-            imagePairCount: imagePairs.length,
+            cardCount: imagePairs.length,
             ...orderMetadata
         });
 
@@ -370,9 +230,9 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
             orderId: orderId,
             userId: req.user.uid,
             status: 'pending',
+            cardCount: imagePairs.length,
             priority: orderMetadata?.priority || 5, // Default medium priority
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            position: 0, // Will be updated by a cloud function that manages the queue
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
         // Save the image pairs in a subcollection (chunking if necessary)
@@ -419,334 +279,6 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
                 details: error.message
             });
         }
-    }
-});
-
-// Get the status of the print queue
-app.get("/print-queue", authenticate, async (req, res) => {
-    try {
-        // Fetch all queue entries for this user, ordered by creation time
-        const queueSnapshot = await admin
-            .firestore()
-            .collection('print-queue')
-            .where('userId', '==', req.user.uid)
-            .orderBy('createdAt', 'desc')
-            .get();
-
-        if (queueSnapshot.empty) {
-            return res.json({ queue: [] });
-        }
-
-        const queueItems = [];
-        queueSnapshot.forEach(doc => {
-            queueItems.push({
-                id: doc.id,
-                ...doc.data(),
-                createdAt: doc.data().createdAt?.toDate() || null
-            });
-        });
-
-        res.json({ queue: queueItems });
-    } catch (error) {
-        console.error("Error fetching print queue:", error);
-        res.status(500).json({
-            error: "Failed to fetch print queue",
-            details: error.message
-        });
-    }
-});
-
-// Get details of a specific print order
-app.get("/print-order/:orderId", authenticate, async (req, res) => {
-    try {
-        const orderId = req.params.orderId;
-
-        // Fetch the order document
-        const orderDoc = await admin
-            .firestore()
-            .collection('print-orders')
-            .doc(orderId)
-            .get();
-
-        if (!orderDoc.exists) {
-            return res.status(404).json({ error: "Print order not found" });
-        }
-
-        // Check if the user has permission to view this order
-        const orderData = orderDoc.data();
-        if (orderData.userId !== req.user.uid) {
-            return res.status(403).json({ error: "You don't have permission to view this order" });
-        }
-
-        // Fetch image pairs (first chunk only for preview)
-        const firstChunkDoc = await orderDoc.ref.collection('image-pairs').doc('chunk-0').get();
-        const firstImagePairs = firstChunkDoc.exists ? firstChunkDoc.data().pairs : [];
-
-        // Generate signed URLs for the first 10 images if needed
-        let previewImages = {};
-
-        if (firstImagePairs.length > 0) {
-            const bucket = admin.storage().bucket();
-            const previewIds = [...new Set(firstImagePairs.flat())].slice(0, 10);
-
-            for (const imageId of previewIds) {
-                try {
-                    const file = bucket.file(`print-images/${orderId}/${imageId}`);
-                    const [exists] = await file.exists();
-
-                    if (exists) {
-                        // Generate a signed URL for this image (valid for 15 minutes)
-                        const [url] = await file.getSignedUrl({
-                            action: 'read',
-                            expires: Date.now() + 15 * 60 * 1000 // 15 minutes
-                        });
-
-                        previewImages[imageId] = url;
-                    }
-                } catch (error) {
-                    console.error(`Error generating signed URL for image ${imageId}:`, error);
-                }
-            }
-        }
-
-        res.json({
-            order: {
-                id: orderDoc.id,
-                ...orderData,
-                previewPairs: firstImagePairs.slice(0, 10),
-                previewImages,
-                createdAt: orderData.createdAt?.toDate() || null,
-                updatedAt: orderData.updatedAt?.toDate() || null
-            }
-        });
-    } catch (error) {
-        console.error("Error fetching print order details:", error);
-        res.status(500).json({
-            error: "Failed to fetch print order details",
-            details: error.message
-        });
-    }
-});
-
-// // Background function to update queue positions and process the queue
-// // This runs on a schedule (every minute) to keep the queue updated
-// exports.updateQueuePositions = functions.pubsub
-//     .schedule('every 1 minutes')
-//     .onRun(async (context) => {
-//         try {
-//             console.log('Running queue position update job');
-
-//             // Get all pending queue items, ordered by priority (high to low) then creation time
-//             const queueSnapshot = await admin
-//                 .firestore()
-//                 .collection('print-queue')
-//                 .where('status', 'in', ['pending', 'ready'])
-//                 .orderBy('priority', 'desc')  // Higher priority first
-//                 .orderBy('createdAt', 'asc')  // Then first come, first served
-//                 .get();
-
-//             if (queueSnapshot.empty) {
-//                 console.log('Queue is empty, nothing to update');
-//                 return null;
-//             }
-
-//             // Update positions in a batch
-//             const batch = admin.firestore().batch();
-//             let position = 1;
-
-//             queueSnapshot.forEach(doc => {
-//                 batch.update(doc.ref, { position: position++ });
-//             });
-
-//             await batch.commit();
-//             console.log(`Updated ${position - 1} queue items with positions`);
-
-//             return null;
-//         } catch (error) {
-//             console.error('Error updating queue positions:', error);
-//             return null;
-//         }
-//     });
-
-// Endpoint for the print service to get the next job in the queue
-app.post("/print-service/next-job", async (req, res) => {
-    try {
-        // This endpoint should be secured by API key or other means in production
-        const apiKey = req.headers['x-api-key'];
-
-        // In production, validate the API key
-        if (!apiKey || apiKey !== process.env.PRINT_SERVICE_API_KEY) {
-            return res.status(403).json({ error: "Invalid API key" });
-        }
-
-        // Get the next job in the queue
-        const queueSnapshot = await admin
-            .firestore()
-            .collection('print-queue')
-            .where('status', '==', 'ready')
-            .orderBy('priority', 'desc')
-            .orderBy('createdAt', 'asc')
-            .limit(1)
-            .get();
-
-        if (queueSnapshot.empty) {
-            return res.json({ message: "No jobs in queue" });
-        }
-
-        const queueDoc = queueSnapshot.docs[0];
-        const queueData = queueDoc.data();
-
-        // Mark the job as processing
-        await queueDoc.ref.update({
-            status: 'processing',
-            processingStartedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        // Get the order details
-        const orderDoc = await admin
-            .firestore()
-            .collection('print-orders')
-            .doc(queueData.orderId)
-            .get();
-
-        if (!orderDoc.exists) {
-            return res.status(404).json({ error: "Order not found for queue item" });
-        }
-
-        // Update the order status
-        await orderDoc.ref.update({
-            status: 'printing',
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        // Get all the image pairs
-        const pairsSnapshot = await orderDoc.ref.collection('image-pairs').orderBy('chunkIndex').get();
-        let allPairs = [];
-
-        pairsSnapshot.forEach(doc => {
-            allPairs = allPairs.concat(doc.data().pairs);
-        });
-
-        // Get all the image references
-        const imageRefsSnapshot = await orderDoc.ref.collection('image-refs').get();
-        const imageRefs = {};
-
-        imageRefsSnapshot.forEach(doc => {
-            imageRefs[doc.id] = doc.data();
-        });
-
-        // Generate signed URLs for all the images
-        const bucket = admin.storage().bucket();
-        const imageUrls = {};
-
-        // Process in batches to avoid too many concurrent operations
-        const uniqueImageIds = [...new Set(allPairs.flat())];
-        const urlBatchSize = 50;
-
-        for (let i = 0; i < uniqueImageIds.length; i += urlBatchSize) {
-            const batchIds = uniqueImageIds.slice(i, i + urlBatchSize);
-
-            await Promise.all(batchIds.map(async (imageId) => {
-                try {
-                    if (imageRefs[imageId]?.storageRef) {
-                        const file = bucket.file(`print-images/${queueData.orderId}/${imageId}`);
-                        const [exists] = await file.exists();
-
-                        if (exists) {
-                            // Generate a signed URL valid for 1 hour
-                            const [url] = await file.getSignedUrl({
-                                action: 'read',
-                                expires: Date.now() + 60 * 60 * 1000 // 1 hour
-                            });
-
-                            imageUrls[imageId] = url;
-                        }
-                    }
-                } catch (error) {
-                    console.error(`Error generating signed URL for image ${imageId}:`, error);
-                }
-            }));
-        }
-
-        res.json({
-            job: {
-                queueId: queueDoc.id,
-                orderId: queueData.orderId,
-                imagePairs: allPairs,
-                imageUrls: imageUrls,
-                metadata: orderDoc.data()
-            }
-        });
-    } catch (error) {
-        console.error("Error getting next print job:", error);
-        res.status(500).json({
-            error: "Failed to get next print job",
-            details: error.message
-        });
-    }
-});
-
-// Endpoint for the print service to mark a job as complete
-app.post("/print-service/job-complete", async (req, res) => {
-    try {
-        // This endpoint should be secured by API key or other means in production
-        const apiKey = req.headers['x-api-key'];
-
-        // In production, validate the API key
-        if (!apiKey || apiKey !== process.env.PRINT_SERVICE_API_KEY) {
-            return res.status(403).json({ error: "Invalid API key" });
-        }
-
-        const { queueId, orderId, status, message } = req.body;
-
-        if (!queueId || !orderId) {
-            return res.status(400).json({ error: "queueId and orderId are required" });
-        }
-
-        // Verify the job exists
-        const queueDoc = await admin
-            .firestore()
-            .collection('print-queue')
-            .doc(queueId)
-            .get();
-
-        if (!queueDoc.exists) {
-            return res.status(404).json({ error: "Queue item not found" });
-        }
-
-        const orderDoc = await admin
-            .firestore()
-            .collection('print-orders')
-            .doc(orderId)
-            .get();
-
-        if (!orderDoc.exists) {
-            return res.status(404).json({ error: "Order not found" });
-        }
-
-        // Update queue and order status
-        const finalStatus = status === 'failed' ? 'failed' : 'completed';
-
-        await queueDoc.ref.update({
-            status: finalStatus,
-            completedAt: admin.firestore.FieldValue.serverTimestamp(),
-            message: message || null
-        });
-
-        await orderDoc.ref.update({
-            status: finalStatus,
-            completedAt: admin.firestore.FieldValue.serverTimestamp(),
-            message: message || null,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        res.json({ message: "Job marked as " + finalStatus });
-    } catch (error) {
-        console.error("Error marking job as complete:", error);
-        res.status(500).json({
-            error: "Failed to mark job as complete",
-            details: error.message
-        });
     }
 });
 
@@ -803,3 +335,94 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// Send order to print service. Can only be called by a founding user
+app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (req, res) => {
+    console.log("Print order requested");
+    res.status(200).json({ message: "Print order requested" });
+
+    // try {
+    //     const { orderId } = req.params;
+
+    //     // Get order details
+    //     const orderDoc = await admin.firestore().collection('print-orders').doc(orderId).get();
+
+    //     if (!orderDoc.exists) {
+    //         return res.status(404).json({ error: "Order not found" });
+    //     }
+
+    //     // Get image pairs for the order
+    //     const imagePairsSnapshot = await orderDoc.ref.collection('image-pairs').get();
+    //     const imagePairs = [];
+
+    //     imagePairsSnapshot.forEach(doc => {
+    //         const data = doc.data();
+    //         imagePairs.push(...data.pairs);
+    //     });
+
+    //     res.status(200).json({
+    //         message: "Print order details retrieved successfully",
+    //         order: orderDoc.data(),
+    //         imagePairs
+    //     });
+    // } catch (error) {
+    //     console.error("Error retrieving print order:", error);
+    //     res.status(500).json({
+    //         error: "Failed to retrieve print order",
+    //         details: error.message
+    //     });
+    // }
+});
+
+// Get all orders with a specific status (founders only)
+app.get("/get-all-orders/:orderStatus?", requireRole('founder'), authenticate, async (req, res) => {
+    try {
+        const { orderStatus } = req.params;
+        let query = admin.firestore().collection('print-queue');
+
+        // If status is provided, filter by it
+        if (orderStatus) {
+            query = query.where('status', '==', orderStatus);
+        }
+
+        // Execute query
+        const snapshot = await query.get();
+
+        if (snapshot.empty) {
+            return res.status(200).json({
+                message: orderStatus
+                    ? `No orders found with status: ${orderStatus}`
+                    : "No orders found",
+                orders: []
+            });
+        }
+
+        // Process results
+        const orders = [];
+        snapshot.forEach(doc => {
+            orders.push({
+                id: doc.id,
+                ...doc.data(),
+                // Convert Firestore timestamps to ISO strings for serialization
+                createdAt: doc.data().createdAt ? doc.data().createdAt.toDate().toISOString() : null,
+                updatedAt: doc.data().updatedAt ? doc.data().updatedAt.toDate().toISOString() : null,
+                completedAt: doc.data().completedAt ? doc.data().completedAt.toDate().toISOString() : null,
+                processingStartedAt: doc.data().processingStartedAt ? doc.data().processingStartedAt.toDate().toISOString() : null
+            });
+        });
+
+        res.status(200).json({
+            message: orderStatus
+                ? `Found ${orders.length} orders with status: ${orderStatus}`
+                : `Found ${orders.length} orders`,
+            orders
+        });
+    } catch (error) {
+        console.error("Error fetching orders:", error);
+        res.status(500).json({
+            error: "Failed to fetch orders",
+            details: error.message
+        });
+    }
+});
+

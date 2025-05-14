@@ -60,4 +60,5 @@ getIdToken('ecomelitist@gmail.com', 'abc123')
         console.error('Error getting token:', error.message);
     });
 
+
 export default getIdToken;
