@@ -10,6 +10,10 @@
 const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 
+const Stripe = require('stripe');
+const stripe = Stripe('place private token here');
+
+
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const express = require("express");
@@ -37,6 +41,27 @@ app.use(express.json());
 
 // Export the Express app as a Cloud Function
 exports.api = functions.https.onRequest(app);
+
+app.post('/create-payment-intent', authenticate, async (req, res) => {
+  const { cardCount } = req.body;
+  const unitPrice = 39; 
+  const packagingCostPerBox = 120; 
+  const numBoxes = Math.ceil(cardCount / 100);
+  const packagingCost = packagingCostPerBox * numBoxes;
+
+  const totalAmount = (unitPrice * cardCount) + packagingCost;
+
+  try {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: totalAmount,
+      currency: 'usd',
+    });
+
+    res.send({ clientSecret: paymentIntent.client_secret });
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
 
 app.post("/signup", async (req, res) => {
     try {
