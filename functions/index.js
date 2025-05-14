@@ -40,7 +40,7 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // Export the Express app as a Cloud Function
-exports.api = functions.https.onRequest(app);
+exports.api = onRequest(app);
 
 // Middleware to verify Firebase ID token
 const authenticate = async (req, res, next) => {
