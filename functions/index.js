@@ -42,25 +42,75 @@ app.use(express.json());
 // Export the Express app as a Cloud Function
 exports.api = functions.https.onRequest(app);
 
+// Middleware to verify Firebase ID token
+const authenticate = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Unauthorized: No token provided" });
+    }
+
+    const idToken = authHeader.split("Bearer ")[1];
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        req.user = decodedToken;
+
+        // If role requirement is specified, check user's role
+        if (req.requiredRole) {
+            const userDoc = await admin.firestore().collection('users').doc(decodedToken.uid).get();
+            const userData = userDoc.data();
+            const userRole = userData?.role || 'user'; // Default to 'user' if no role specified
+
+            // Define role hierarchy with numeric values (higher = more privileges)
+            const roleHierarchy = {
+                'user': 1,
+                'staff': 2,
+                'admin': 3,
+                'founder': 4
+            };
+
+            // Check if user's role has sufficient privileges
+            if (!roleHierarchy[userRole] || roleHierarchy[userRole] < roleHierarchy[req.requiredRole]) {
+                return res.status(403).json({
+                    error: "Forbidden",
+                    message: `This action requires ${req.requiredRole} role or higher`
+                });
+            }
+        }
+
+        next();
+    } catch (error) {
+        res.status(403).json({ error: "Invalid token" });
+    }
+};
+
+// Middleware to require a specific role
+const requireRole = (role) => {
+    return (req, res, next) => {
+        req.requiredRole = role;
+        next();
+    };
+};
+
+
 app.post('/create-payment-intent', authenticate, async (req, res) => {
-  const { cardCount } = req.body;
-  const unitPrice = 39; 
-  const packagingCostPerBox = 120; 
-  const numBoxes = Math.ceil(cardCount / 100);
-  const packagingCost = packagingCostPerBox * numBoxes;
+    const { cardCount } = req.body;
+    const unitPrice = 39;
+    const packagingCostPerBox = 120;
+    const numBoxes = Math.ceil(cardCount / 100);
+    const packagingCost = packagingCostPerBox * numBoxes;
 
-  const totalAmount = (unitPrice * cardCount) + packagingCost;
+    const totalAmount = (unitPrice * cardCount) + packagingCost;
 
-  try {
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: totalAmount,
-      currency: 'usd',
-    });
+    try {
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount: totalAmount,
+            currency: 'usd',
+        });
 
-    res.send({ clientSecret: paymentIntent.client_secret });
-  } catch (error) {
-    res.status(500).send({ error: error.message });
-  }
+        res.send({ clientSecret: paymentIntent.client_secret });
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
 });
 
 app.post("/signup", async (req, res) => {
@@ -124,54 +174,7 @@ app.post("/signup", async (req, res) => {
 });
 
 
-// Middleware to verify Firebase ID token
-const authenticate = async (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Unauthorized: No token provided" });
-    }
 
-    const idToken = authHeader.split("Bearer ")[1];
-    try {
-        const decodedToken = await admin.auth().verifyIdToken(idToken);
-        req.user = decodedToken;
-
-        // If role requirement is specified, check user's role
-        if (req.requiredRole) {
-            const userDoc = await admin.firestore().collection('users').doc(decodedToken.uid).get();
-            const userData = userDoc.data();
-            const userRole = userData?.role || 'user'; // Default to 'user' if no role specified
-
-            // Define role hierarchy with numeric values (higher = more privileges)
-            const roleHierarchy = {
-                'user': 1,
-                'staff': 2,
-                'admin': 3,
-                'founder': 4
-            };
-
-            // Check if user's role has sufficient privileges
-            if (!roleHierarchy[userRole] || roleHierarchy[userRole] < roleHierarchy[req.requiredRole]) {
-                return res.status(403).json({
-                    error: "Forbidden",
-                    message: `This action requires ${req.requiredRole} role or higher`
-                });
-            }
-        }
-
-        next();
-    } catch (error) {
-        res.status(403).json({ error: "Invalid token" });
-    }
-};
-
-// Middleware to require a specific role
-const requireRole = (role) => {
-    return (req, res, next) => {
-        req.requiredRole = role;
-        next();
-    };
-};
 
 // Validate token
 app.post("/validate-token", authenticate, async (req, res) => {
@@ -375,24 +378,20 @@ app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (r
 });
 
 // Get all orders with a specific status (founders only)
-app.get("/get-all-orders/:orderStatus?", requireRole('founder'), authenticate, async (req, res) => {
+app.get("/get-all-orders/:orderStatus", requireRole('founder'), authenticate, async (req, res) => {
     try {
         const { orderStatus } = req.params;
         let query = admin.firestore().collection('print-queue');
 
-        // If status is provided, filter by it
-        if (orderStatus) {
-            query = query.where('status', '==', orderStatus);
-        }
+        // Filter by status since it's provided in this route
+        query = query.where('status', '==', orderStatus);
 
         // Execute query
         const snapshot = await query.get();
 
         if (snapshot.empty) {
             return res.status(200).json({
-                message: orderStatus
-                    ? `No orders found with status: ${orderStatus}`
-                    : "No orders found",
+                message: `No orders found with status: ${orderStatus}`,
                 orders: []
             });
         }
@@ -412,9 +411,47 @@ app.get("/get-all-orders/:orderStatus?", requireRole('founder'), authenticate, a
         });
 
         res.status(200).json({
-            message: orderStatus
-                ? `Found ${orders.length} orders with status: ${orderStatus}`
-                : `Found ${orders.length} orders`,
+            message: `Found ${orders.length} orders with status: ${orderStatus}`,
+            orders
+        });
+    } catch (error) {
+        console.error("Error fetching orders:", error);
+        res.status(500).json({
+            error: "Failed to fetch orders",
+            details: error.message
+        });
+    }
+});
+
+// Get all orders regardless of status (founders only)
+app.get("/get-all-orders", requireRole('founder'), authenticate, async (req, res) => {
+    try {
+        // Query all orders without status filter
+        const snapshot = await admin.firestore().collection('print-queue').get();
+
+        if (snapshot.empty) {
+            return res.status(200).json({
+                message: "No orders found",
+                orders: []
+            });
+        }
+
+        // Process results
+        const orders = [];
+        snapshot.forEach(doc => {
+            orders.push({
+                id: doc.id,
+                ...doc.data(),
+                // Convert Firestore timestamps to ISO strings for serialization
+                createdAt: doc.data().createdAt ? doc.data().createdAt.toDate().toISOString() : null,
+                updatedAt: doc.data().updatedAt ? doc.data().updatedAt.toDate().toISOString() : null,
+                completedAt: doc.data().completedAt ? doc.data().completedAt.toDate().toISOString() : null,
+                processingStartedAt: doc.data().processingStartedAt ? doc.data().processingStartedAt.toDate().toISOString() : null
+            });
+        });
+
+        res.status(200).json({
+            message: `Found ${orders.length} orders`,
             orders
         });
     } catch (error) {

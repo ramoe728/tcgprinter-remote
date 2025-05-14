@@ -52,7 +52,7 @@ async function getIdToken(email, password) {
 }
 
 // Properly handle the Promise
-getIdToken('ecomelitist@gmail.com', 'abc123')
+getIdToken('ryanallenmoe@gmail.com', '')
     .then(token => {
         console.log('ID Token:', token);
     })
