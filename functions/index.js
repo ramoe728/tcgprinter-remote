@@ -13,7 +13,7 @@ const logger = require("firebase-functions/logger");
 
 const functions = require("firebase-functions");
 //instantiate stripe
-const Stripe = require('stripe')(functions.config().stripe.secret_key);
+const Stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
