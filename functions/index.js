@@ -7,41 +7,169 @@
  * See a full list of supported triggers at https://firebase.google.com/docs/functions
  */
 
-const { onRequest } = require("firebase-functions/v2/https");
-const logger = require("firebase-functions/logger");
+import { onRequest } from "firebase-functions/v2/https";
+import * as logger from "firebase-functions/logger";
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import * as functions from "firebase-functions";
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
+import { initializeApp, cert, getApps } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
+import express from "express";
+import cors from "cors";
+import dotenv from 'dotenv';
+import { Stripe } from 'stripe';
 
+// Load environment variables from .env file
+dotenv.config();
 
-const functions = require("firebase-functions");
-//instantiate stripe
-const Stripe = require('stripe')(process.env.STRIPE_PRIVATE_KEY);
-
-const admin = require("firebase-admin");
-const express = require("express");
-const cors = require("cors");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Initialize Firebase Admin with proper configuration
-if (process.env.FUNCTIONS_EMULATOR) {
-    // Local development with emulators
-    admin.initializeApp();
-    console.log('Using Firebase emulators');
-} else {
-    // Production environment
-    const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_API_KEY);
-    console.log('Service Account Project ID:', serviceAccount.project_id);
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id,
-        storageBucket: `${serviceAccount.project_id}.appspot.com`
-    });
-    console.log('Using production Firebase environment');
+let adminApp;
+let auth;
+let db;
+let storage;
+
+async function initializeFirebase() {
+    try {
+        let serviceAccount;
+        if (process.env.FUNCTIONS_EMULATOR) {
+            // Local development - use environment variable
+            if (!process.env.SERVICE_ACCOUNT) {
+                throw new Error('SERVICE_ACCOUNT environment variable not found. Please check your .env file.');
+            }
+            serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
+            console.log('Using environment variable for development');
+        } else {
+            // Production - use application default credentials
+            console.log('Using application default credentials for production');
+            // Initialize without explicit credentials in production
+            if (getApps().length === 0) {
+                adminApp = initializeApp();
+                console.log('Firebase Admin initialized with default credentials');
+            } else {
+                adminApp = getApps()[0];
+                console.log('Firebase Admin already initialized');
+            }
+            return;
+        }
+        
+        console.log('Service Account Project ID:', serviceAccount.project_id);
+        console.log('Service Account Client Email:', serviceAccount.client_email);
+        
+        if (getApps().length === 0) {
+            adminApp = initializeApp({
+                credential: cert(serviceAccount),
+                projectId: serviceAccount.project_id,
+                storageBucket: `${serviceAccount.project_id}.appspot.com`
+            });
+            console.log('Firebase Admin initialized successfully');
+        } else {
+            adminApp = getApps()[0];
+            console.log('Firebase Admin already initialized');
+        }
+    } catch (error) {
+        console.error('Error initializing Firebase Admin:', error);
+        throw error; // Re-throw to handle it in the calling code
+    }
 }
+
+// Initialize Firebase services
+try {
+    await initializeFirebase();
+    auth = getAuth();
+    db = getFirestore();
+    storage = getStorage();
+    console.log('Firebase services initialized successfully');
+} catch (error) {
+    console.error('Failed to initialize Firebase services:', error);
+    // Don't throw here, let the app continue and handle errors at runtime
+}
+
+const secretsClient = new SecretManagerServiceClient();
+
+async function getSecret(secretName) {
+    const [version] = await secretsClient.accessSecretVersion({
+      name: `projects/tcgprinter-81fb5/secrets/${secretName}/versions/latest`,
+    });
+    return version.payload.data.toString();
+  }
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
+// Initialize Stripe
+const stripe = new Stripe(process.env.STRIPE_PRIVATE_KEY);
+
+// Add a test endpoint to verify configuration
+app.get("/test-config", async (req, res) => {
+    console.log('Test config endpoint hit');
+    try {
+        if (!adminApp) {
+            // In production, we should already be initialized with default credentials
+            if (!process.env.FUNCTIONS_EMULATOR) {
+                adminApp = getApps()[0];
+                if (!adminApp) {
+                    throw new Error('Firebase Admin not initialized in production');
+                }
+            } else {
+                // Only try to initialize with service account in emulator
+                const serviceAccount = await getSecret('SERVICE_ACCOUNT');
+                adminApp = initializeApp({
+                    credential: cert(serviceAccount),
+                    projectId: serviceAccount.project_id,
+                    storageBucket: `${serviceAccount.project_id}.appspot.com`
+                });
+            }
+        }
+
+        const config = {
+            environment: process.env.FUNCTIONS_EMULATOR ? 'Emulator' : 'Production',
+            projectId: adminApp.options.projectId,
+            storageBucket: adminApp.options.storageBucket,
+            source: process.env.FUNCTIONS_EMULATOR ? 'local-env' : 'default-credentials'
+        };
+        console.log('Config object created:', config);
+        
+        // Test Firestore connection
+        try {
+            const testDoc = await db.collection('test').doc('config-test').set({
+                timestamp: new Date(),
+                test: true
+            });
+            console.log('Firestore test successful');
+        } catch (firestoreError) {
+            console.error('Firestore test failed:', firestoreError);
+            return res.status(500).json({
+                error: "Firestore test failed",
+                details: firestoreError.message
+            });
+        }
+        
+        res.json({
+            message: "Configuration verified successfully",
+            config,
+            firestoreTest: "Write successful"
+        });
+    } catch (error) {
+        console.error('Test config endpoint error:', error);
+        res.status(500).json({
+            error: "Configuration verification failed",
+            details: error.message,
+            stack: error.stack
+        });
+    }
+});
+
 // Export the Express app as a Cloud Function
-exports.api = onRequest(app);
+export const api = onRequest(app);
 
 // Middleware to verify Firebase ID token
 const authenticate = async (req, res, next) => {
@@ -52,12 +180,12 @@ const authenticate = async (req, res, next) => {
 
     const idToken = authHeader.split("Bearer ")[1];
     try {
-        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        const decodedToken = await auth.verifyIdToken(idToken);
         req.user = decodedToken;
 
         // If role requirement is specified, check user's role
         if (req.requiredRole) {
-            const userDoc = await admin.firestore().collection('users').doc(decodedToken.uid).get();
+            const userDoc = await db.collection('users').doc(decodedToken.uid).get();
             const userData = userDoc.data();
             const userRole = userData?.role || 'user'; // Default to 'user' if no role specified
 
@@ -124,7 +252,7 @@ app.post("/signup", async (req, res) => {
         let userRecord;
         try {
             // Create user with Firebase Authentication
-            userRecord = await admin.auth().createUser({
+            userRecord = await auth.createUser({
                 email,
                 password,
                 displayName
@@ -141,7 +269,7 @@ app.post("/signup", async (req, res) => {
 
         try {
             // Store additional user data in Firestore
-            const userRef = admin.firestore().collection("users").doc(userRecord.uid);
+            const userRef = db.collection("users").doc(userRecord.uid);
             await userRef.set({
                 email,
                 displayName,
@@ -200,14 +328,14 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         console.log(`Processing print order with ${imagePairs.length} image pairs`);
 
         // Generate IDs for the order and queue entry
-        const orderId = admin.firestore().collection('print-orders').doc().id;
-        const queueId = admin.firestore().collection('print-queue').doc().id;
+        const orderId = db.collection('print-orders').doc().id;
+        const queueId = db.collection('print-queue').doc().id;
 
         // Create a new order document
-        const orderRef = admin.firestore().collection('print-orders').doc(orderId);
+        const orderRef = db.collection('print-orders').doc(orderId);
 
         // Store the order metadata in the users collection {userId}/orders/{orderId}
-        const userRef = admin.firestore().collection('users').doc(uid);
+        const userRef = db.collection('users').doc(uid);
         await userRef.collection('orders').doc(orderId).set({
             orderId,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -217,7 +345,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         });
 
         // Start a Firestore batch for atomicity
-        const batch = admin.firestore().batch();
+        const batch = db.batch();
 
         // Save the order metadata
         batch.set(orderRef, {
@@ -229,7 +357,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         });
 
         // Save the queue entry - this is what the print service will look for
-        const queueRef = admin.firestore().collection('print-queue').doc(queueId);
+        const queueRef = db.collection('print-queue').doc(queueId);
         batch.set(queueRef, {
             orderId: orderId,
             userId: req.user.uid,
@@ -264,7 +392,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
 
         // Now handle image data - we'll save references in Firestore and actual data in Storage
         // Initialize storage bucket
-        const bucket = admin.storage().bucket();
+        const bucket = storage.bucket();
 
         // Return success early while we continue processing images in the background
         res.status(201).json({
@@ -295,7 +423,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         }
 
         // Create order metadata first
-        const orderRef = admin.firestore().collection('print-orders').doc(orderId);
+        const orderRef = db.collection('print-orders').doc(orderId);
         await orderRef.set({
             userId: req.user.uid,
             status: 'uploading',
@@ -304,7 +432,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         });
 
         // Generate signed URLs for each image
-        const bucket = admin.storage().bucket();
+        const bucket = storage.bucket();
         const uploadUrls = {};
 
         await Promise.all(imageIds.map(async (imageId) => {
@@ -382,7 +510,7 @@ app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (r
 app.get("/get-all-orders/:orderStatus", requireRole('founder'), authenticate, async (req, res) => {
     try {
         const { orderStatus } = req.params;
-        let query = admin.firestore().collection('print-queue');
+        let query = db.collection('print-queue');
 
         // Filter by status since it's provided in this route
         query = query.where('status', '==', orderStatus);
@@ -428,7 +556,7 @@ app.get("/get-all-orders/:orderStatus", requireRole('founder'), authenticate, as
 app.get("/get-all-orders", requireRole('founder'), authenticate, async (req, res) => {
     try {
         // Query all orders without status filter
-        const snapshot = await admin.firestore().collection('print-queue').get();
+        const snapshot = await db.collection('print-queue').get();
 
         if (snapshot.empty) {
             return res.status(200).json({

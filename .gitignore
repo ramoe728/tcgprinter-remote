@@ -1,3 +1,4 @@
 functions/config/
 node_modules/
 .env
+functions/.runtimeconfig.json
