@@ -26,11 +26,12 @@ if (process.env.FUNCTIONS_EMULATOR) {
     console.log('Using Firebase emulators');
 } else {
     // Production environment
-    const serviceAccount = require('./config/serviceAccountKey.json');
+    const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_API_KEY);
     console.log('Service Account Project ID:', serviceAccount.project_id);
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: serviceAccount.project_id
+        projectId: serviceAccount.project_id,
+        storageBucket: `${serviceAccount.project_id}.appspot.com`
     });
     console.log('Using production Firebase environment');
 }
