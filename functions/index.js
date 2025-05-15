@@ -10,11 +10,10 @@
 const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
 
-const Stripe = require('stripe');
-const stripe = Stripe('place private token here');
-
 
 const functions = require("firebase-functions");
+//instantiate stripe
+const Stripe = require('stripe')(functions.config().stripe.secret_key);
 const admin = require("firebase-admin");
 const express = require("express");
 const cors = require("cors");
