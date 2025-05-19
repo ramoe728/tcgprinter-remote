@@ -223,20 +223,26 @@ const requireRole = (role) => {
 
 app.post('/create-payment-intent', authenticate, async (req, res) => {
     const { cardCount } = req.body;
-    const unitPrice = 39;
-    const packagingCostPerBox = 120;
     const numBoxes = Math.ceil(cardCount / 100);
-    const packagingCost = packagingCostPerBox * numBoxes;
 
     const totalAmount = (unitPrice * cardCount) + packagingCost;
 
     try {
-        const paymentIntent = await stripe.paymentIntents.create({
-            amount: totalAmount,
-            currency: 'usd',
-        });
-
-        res.send({ clientSecret: paymentIntent.client_secret });
+        const session = await stripe.checkout.sessions.create({
+            mode: 'payment',
+            ui_mode: 'embedded',
+            line_items: [
+                {
+                price: 'price_1RQWyMLWCAaLY4PACFj7HV7G', // this is the price id for a card in stripe
+                quantity: cardCount
+                },
+                {
+                price: 'price_1RQX4FLWCAaLY4PAS4rMWCHc', // this is the price id for packaging stripe
+                quantity: numBoxes
+                }
+            ],
+            return_url: 'https://tcgprinter.com/building'})
+        res.send({ clientSecret: session.client_secret });
     } catch (error) {
         res.status(500).send({ error: error.message });
     }
