@@ -225,8 +225,6 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
     const { cardCount } = req.body;
     const numBoxes = Math.ceil(cardCount / 100);
 
-    const totalAmount = (unitPrice * cardCount) + packagingCost;
-
     try {
         const session = await stripe.checkout.sessions.create({
             mode: 'payment',
@@ -244,6 +242,8 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
             return_url: 'https://tcgprinter.com/building'})
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
+        console.log(process.env.STRIPE_PRIVATE_KEY)
+        console.log(error.message)
         res.status(500).send({ error: error.message });
     }
 });
