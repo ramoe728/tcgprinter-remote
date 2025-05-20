@@ -243,25 +243,38 @@ const requireRole = (role) => {
 
 app.post('/create-payment-intent', authenticate, async (req, res) => {
     const { cardCount } = req.body;
-    const numBoxes = Math.ceil(cardCount / 100);
+    const {deliveryMethod} = req.body
+    const numBoxes = Math.ceil(cardCount / 125);
+    const box_packaging_cost = 120
+    const packaging_total = numBoxes * box_packaging_cost
+    const flat_rate_shipping_cost = 1000
+    const shippingPackagingTotal = flat_rate_shipping_cost + packaging_total ;
 
     try {
         const stripeInstance = await getStripe();
         const session = await stripeInstance.checkout.sessions.create({
-            mode: 'payment',
             ui_mode: 'embedded',
+            mode: 'payment',
             line_items: [
                 {
                     price: 'price_1RQWyMLWCAaLY4PACFj7HV7G', // this is the price id for a card in stripe
                     quantity: cardCount
                 },
                 {
-                    price: 'price_1RQX4FLWCAaLY4PAS4rMWCHc', // this is the price id for packaging stripe
-                    quantity: numBoxes
-                }
+                    // Custom combined shipping + packaging 
+                    price_data: {
+                        currency: 'usd',
+                        product_data: {
+                        name: 'Shipping & Packaging',
+                        },
+                        unit_amount: deliveryMethod == 'shipping' ? shippingPackagingTotal: packaging_total,
+                    },
+                    quantity: 1,
+                    },
             ],
             return_url: 'https://tcgprinter.com/building'
         })
+    
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
         console.log(process.env.STRIPE_PRIVATE_KEY)
