@@ -38,6 +38,10 @@ let storage;
 
 async function initializeFirebase() {
     try {
+        //if /config/serviceAccountKey.json exists, load it into environment variab SERVICE_ACCOUNT
+        if (fs.existsSync(path.join(__dirname, 'config', 'serviceAccountKey.json'))) {
+            process.env.SERVICE_ACCOUNT = fs.readFileSync(path.join(__dirname, 'config', 'serviceAccountKey.json'), 'utf8');
+        }
         let serviceAccount;
         if (process.env.FUNCTIONS_EMULATOR) {
             // Local development - use environment variable
@@ -59,10 +63,10 @@ async function initializeFirebase() {
             }
             return;
         }
-        
+
         console.log('Service Account Project ID:', serviceAccount.project_id);
         console.log('Service Account Client Email:', serviceAccount.client_email);
-        
+
         if (getApps().length === 0) {
             adminApp = initializeApp({
                 credential: cert(serviceAccount),
@@ -92,21 +96,37 @@ try {
     // Don't throw here, let the app continue and handle errors at runtime
 }
 
-const secretsClient = new SecretManagerServiceClient();
+// Create a function to get the secrets client - only when needed
+let secretsClient = null;
+async function getSecretsClient() {
+    if (!secretsClient) {
+        secretsClient = new SecretManagerServiceClient();
+    }
+    return secretsClient;
+}
 
 async function getSecret(secretName) {
-    const [version] = await secretsClient.accessSecretVersion({
-      name: `projects/tcgprinter-81fb5/secrets/${secretName}/versions/latest`,
+    const client = await getSecretsClient();
+    const [version] = await client.accessSecretVersion({
+        name: `projects/tcgprinter-81fb5/secrets/${secretName}/versions/latest`,
     });
     return version.payload.data.toString();
-  }
+}
 
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// Initialize Stripe
-const stripe = new Stripe(process.env.STRIPE_PRIVATE_KEY);
+// Initialize Stripe - lazy initialization
+let stripe = null;
+async function getStripe() {
+    if (!stripe) {
+        const stripeKey = process.env.STRIPE_PRIVATE_KEY || await getSecret('STRIPE_PRIVATE_KEY');
+        stripe = new Stripe(stripeKey);
+    }
+    return stripe;
+}
+
 
 // Add a test endpoint to verify configuration
 app.get("/test-config", async (req, res) => {
@@ -137,7 +157,7 @@ app.get("/test-config", async (req, res) => {
             source: process.env.FUNCTIONS_EMULATOR ? 'local-env' : 'default-credentials'
         };
         console.log('Config object created:', config);
-        
+
         // Test Firestore connection
         try {
             const testDoc = await db.collection('test').doc('config-test').set({
@@ -152,7 +172,7 @@ app.get("/test-config", async (req, res) => {
                 details: firestoreError.message
             });
         }
-        
+
         res.json({
             message: "Configuration verified successfully",
             config,
@@ -228,20 +248,22 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
     const totalAmount = (unitPrice * cardCount) + packagingCost;
 
     try {
-        const session = await stripe.checkout.sessions.create({
+        const stripeInstance = await getStripe();
+        const session = await stripeInstance.checkout.sessions.create({
             mode: 'payment',
             ui_mode: 'embedded',
             line_items: [
                 {
-                price: 'price_1RQWyMLWCAaLY4PACFj7HV7G', // this is the price id for a card in stripe
-                quantity: cardCount
+                    price: 'price_1RQWyMLWCAaLY4PACFj7HV7G', // this is the price id for a card in stripe
+                    quantity: cardCount
                 },
                 {
-                price: 'price_1RQX4FLWCAaLY4PAS4rMWCHc', // this is the price id for packaging stripe
-                quantity: numBoxes
+                    price: 'price_1RQX4FLWCAaLY4PAS4rMWCHc', // this is the price id for packaging stripe
+                    quantity: numBoxes
                 }
             ],
-            return_url: 'https://tcgprinter.com/building'})
+            return_url: 'https://tcgprinter.com/building'
+        })
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
         res.status(500).send({ error: error.message });
@@ -473,6 +495,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
 
 // Send order to print service. Can only be called by a founding user
 app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (req, res) => {
