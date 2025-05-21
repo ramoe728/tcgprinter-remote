@@ -121,7 +121,7 @@ app.use(express.json());
 let stripe = null;
 async function getStripe() {
     if (!stripe) {
-        const stripeKey = process.env.STRIPE_PRIVATE_KEY || await getSecret('STRIPE_PRIVATE_KEY');
+        const stripeKey = process.env.STRIPE_P_KEY || await getSecret('STRIPE_P_KEY');
         stripe = new Stripe(stripeKey);
     }
     return stripe;
@@ -277,7 +277,7 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
     
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
-        console.log(process.env.STRIPE_PRIVATE_KEY)
+        console.log(process.env.STRIPE_P_KEY)
         console.log(error.message)
         res.status(500).send({ error: error.message });
     }
