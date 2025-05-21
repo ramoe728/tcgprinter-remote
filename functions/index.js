@@ -23,6 +23,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from 'dotenv';
 import { Stripe } from 'stripe';
+import { defineSecret } from "firebase-functions/params";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -118,11 +119,12 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // Initialize Stripe - lazy initialization
+const stripe_key = defineSecret("STRIPE_P_KEY")
 let stripe = null;
 async function getStripe() {
     if (!stripe) {
-        const stripeKey = process.env.STRIPE_P_KEY || await getSecret('STRIPE_P_KEY');
-        stripe = new Stripe(stripeKey);
+        
+        stripe = new Stripe(process.env.STRIPE_P_KEY);
     }
     return stripe;
 }
@@ -188,8 +190,7 @@ app.get("/test-config", async (req, res) => {
     }
 });
 
-// Export the Express app as a Cloud Function
-export const api = onRequest(app);
+
 
 // Middleware to verify Firebase ID token
 const authenticate = async (req, res, next) => {
@@ -253,6 +254,7 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
     try {
         const stripeInstance = await getStripe();
         const session = await stripeInstance.checkout.sessions.create({
+            payment_method_types: ['card'],
             ui_mode: 'embedded',
             mode: 'payment',
             line_items: [
@@ -277,7 +279,6 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
     
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
-        console.log(process.env.STRIPE_P_KEY)
         console.log(error.message)
         res.status(500).send({ error: error.message });
     }
@@ -633,4 +634,6 @@ app.get("/get-all-orders", requireRole('founder'), authenticate, async (req, res
         });
     }
 });
+
+export const api = onRequest({ secrets: [stripe_key] }, app);
 
