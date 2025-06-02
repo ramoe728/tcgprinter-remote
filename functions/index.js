@@ -17,7 +17,7 @@ import * as functions from "firebase-functions";
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import express from "express";
 import cors from "cors";
@@ -368,6 +368,10 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         }
 
         console.log(`Processing print order with ${imagePairs.length} image pairs`);
+        console.log('Image pairs:', JSON.stringify(imagePairs, null, 2));
+
+        console.log('Image pairs:', imagePairs.length);
+        console.log('Image pairs:', imagePairs);
 
         // Generate IDs for the order and queue entry
         const orderId = db.collection('print-orders').doc().id;
@@ -376,12 +380,17 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         // Create a new order document
         const orderRef = db.collection('print-orders').doc(orderId);
 
+        console.log('Order metadata:', orderMetadata);
+        console.log('orderId:', orderId);
+        console.log('queueId:', queueId);
+        console.log('orderRef:', orderRef);
+
         // Store the order metadata in the users collection {userId}/orders/{orderId}
         const userRef = db.collection('users').doc(uid);
         await userRef.collection('orders').doc(orderId).set({
             orderId,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
             cardCount: imagePairs.length,
             ...orderMetadata
         });
@@ -389,12 +398,21 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
         // Start a Firestore batch for atomicity
         const batch = db.batch();
 
-        // Save the order metadata
+        // Separate front and back images into arrays
+        const front_images = imagePairs.map(pair => pair[0]);
+        const back_images = imagePairs.map(pair => pair[1]);
+
+        // Save the order metadata with image arrays
         batch.set(orderRef, {
             userId: req.user.uid,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
             cardCount: imagePairs.length,
+            status: 'pending',
+            imagePairs: {
+                front_images,
+                back_images
+            },
             ...orderMetadata
         });
 
@@ -406,37 +424,14 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
             status: 'pending',
             cardCount: imagePairs.length,
             priority: orderMetadata?.priority || 5, // Default medium priority
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
+            createdAt: FieldValue.serverTimestamp()
         });
-
-        // Save the image pairs in a subcollection (chunking if necessary)
-        const CHUNK_SIZE = 400; // Firestore has a limit of 500 operations per batch
-
-        // Calculate number of chunks needed
-        const chunks = Math.ceil(imagePairs.length / CHUNK_SIZE);
-
-        for (let i = 0; i < chunks; i++) {
-            // Get current chunk of image pairs
-            const chunk = imagePairs.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-
-            // Save this chunk to a subcollection document
-            const pairsDocRef = orderRef.collection('image-pairs').doc(`chunk-${i}`);
-            batch.set(pairsDocRef, {
-                pairs: chunk,
-                chunkIndex: i,
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
 
         // Commit the batch write
         await batch.commit();
-        console.log(`Saved order metadata, queue entry, and ${imagePairs.length} image pairs in ${chunks} chunks`);
+        console.log(`Saved order metadata, queue entry, and ${imagePairs.length} image pairs`);
 
-        // Now handle image data - we'll save references in Firestore and actual data in Storage
-        // Initialize storage bucket
-        const bucket = storage.bucket();
-
-        // Return success early while we continue processing images in the background
+        // Return success response
         res.status(201).json({
             message: "Print order added to queue successfully",
             orderId,
@@ -457,6 +452,7 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
 });
 
 // Backend endpoint to get upload URLs
+// Add-order-to-queue is expected to be called first in order to have an orderId
 app.post("/get-upload-urls", authenticate, async (req, res) => {
     try {
         const { imageIds, orderId } = req.body;
@@ -469,7 +465,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         await orderRef.set({
             userId: req.user.uid,
             status: 'uploading',
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
             totalImages: imageIds.length
         });
 
@@ -493,7 +489,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
             await orderRef.collection('image-refs').doc(imageId).set({
                 storageRef: filePath,
                 uploadStatus: 'pending',
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
+                createdAt: FieldValue.serverTimestamp()
             });
 
             uploadUrls[imageId] = url;
