@@ -502,8 +502,16 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
                     metadata: {
                         contentType: 'application/octet-stream',
                     },
-                    origin: 'https://tcgprinter.com',
-                    resumable: true
+                    origin: ['https://tcgprinter.com', 'https://tcgprinterhosting.web.app'],
+                    resumable: true,
+                    cors: [
+                        {
+                            origin: ['https://tcgprinter.com', 'https://tcgprinterhosting.web.app'],
+                            method: ['PUT', 'GET', 'HEAD'],
+                            responseHeader: ['Content-Type', 'Access-Control-Allow-Origin'],
+                            maxAgeSeconds: 3600
+                        }
+                    ]
                 });
 
                 console.log('Successfully created upload URL for:', filePath);
