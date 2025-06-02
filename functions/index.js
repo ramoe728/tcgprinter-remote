@@ -460,39 +460,58 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
             return res.status(400).json({ error: "Invalid request" });
         }
 
-        // Create order metadata first
+        console.log('Current Firebase App:', adminApp ? {
+            projectId: adminApp.options.projectId,
+            serviceAccount: adminApp.options.credential ? 'Using service account' : 'Using default credentials'
+        } : 'No app initialized');
+
+        // Get the order document to verify it exists
         const orderRef = db.collection('print-orders').doc(orderId);
-        await orderRef.set({
-            userId: req.user.uid,
-            status: 'uploading',
-            createdAt: FieldValue.serverTimestamp(),
-            totalImages: imageIds.length
+        const orderDoc = await orderRef.get();
+
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: "Order not found" });
+        }
+
+        // Update only the status field
+        await orderRef.update({
+            status: 'uploading'
         });
 
-        // Generate signed URLs for each image
+        // Generate upload URLs for each image
         const bucket = storage.bucket();
+        console.log('Storage bucket:', bucket.name);
+        
         const uploadUrls = {};
 
         await Promise.all(imageIds.map(async (imageId) => {
             const filePath = `print-images/${orderId}/${imageId}`;
             const file = bucket.file(filePath);
+            console.log('Creating upload URL for:', filePath);
 
-            // Create a signed URL for uploading (valid for 15 minutes)
-            const [url] = await file.getSignedUrl({
-                version: 'v4',
-                action: 'write',
-                expires: Date.now() + 15 * 60 * 1000, // 15 minutes
-                contentType: 'application/octet-stream',
-            });
+            try {
+                // Create a reference in Firestore first
+                await orderRef.collection('image-refs').doc(imageId).set({
+                    storageRef: filePath,
+                    uploadStatus: 'pending',
+                    createdAt: FieldValue.serverTimestamp()
+                });
 
-            // Store reference in Firestore
-            await orderRef.collection('image-refs').doc(imageId).set({
-                storageRef: filePath,
-                uploadStatus: 'pending',
-                createdAt: FieldValue.serverTimestamp()
-            });
+                // Get a resumable upload URL
+                const [url] = await file.createResumableUpload({
+                    metadata: {
+                        contentType: 'application/octet-stream',
+                    },
+                    origin: 'https://tcgprinter.com',
+                    resumable: true
+                });
 
-            uploadUrls[imageId] = url;
+                console.log('Successfully created upload URL for:', filePath);
+                uploadUrls[imageId] = url;
+            } catch (error) {
+                console.error('Error creating upload URL:', error);
+                throw error;
+            }
         }));
 
         res.json({
@@ -502,7 +521,10 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         });
     } catch (error) {
         console.error("Error generating upload URLs:", error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: error.message,
+            details: "Please ensure the Firebase Storage bucket is properly configured and the service account has the necessary permissions."
+        });
     }
 });
 
