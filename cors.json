@@ -1,0 +1,14 @@
+[
+    {
+      "origin": ["https://tcgprinter.com", "https://tcgprinterhosting.web.app"],
+      "method": ["GET", "HEAD", "PUT", "POST", "OPTIONS"],
+      "responseHeader": [
+        "Content-Type",
+        "Access-Control-Allow-Origin",
+        "Content-Length",
+        "Content-Range",
+        "x-goog-content-length-range"
+      ],
+      "maxAgeSeconds": 3600
+    }
+  ]
