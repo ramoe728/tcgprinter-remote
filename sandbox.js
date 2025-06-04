@@ -1,18 +1,11 @@
 // Firebase authentication utility for getting ID tokens
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword } from 'firebase/auth';
-import 'dotenv/config';
-
+import fs from 'fs';
+import fetch from 'node-fetch';
+import { firebaseConfig } from './functions/config/firebase.js';
 // Initialize Firebase with your project configuration
 // Replace these values with your actual Firebase project details
-const firebaseConfig = {
-    apiKey: process.env.FIREBASE_API_KEY,
-    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
-    appId: process.env.FIREBASE_APP_ID
-};
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -34,7 +27,6 @@ async function getIdToken(email, password) {
         // Get the authenticated user
         const user = userCredential.user;
         // console.log("USER", user);
-        console.log("uid", user.uid);
         // Get the ID token
         const idToken = await user.getIdToken();
 
@@ -51,14 +43,60 @@ async function getIdToken(email, password) {
     }
 }
 
-// Properly handle the Promise
-getIdToken('ryanallenmoe@gmail.com', '')
-    .then(token => {
-        console.log('ID Token:', token);
-    })
-    .catch(error => {
-        console.error('Error getting token:', error.message);
+async function getUploadUrl(imageId, orderId, idToken) {
+    const response = await fetch(`https://us-central1-tcgprinter-81fb5.cloudfunctions.net/api/get-upload-urls`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${idToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ imageIds: [imageId], orderId })
     });
 
+    return response.json();
+}
 
-export default getIdToken;
+async function uploadImage(file, uploadUrl, idToken) {
+    try {
+        const response = await fetch(uploadUrl, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'image/png',
+                'Content-Length': file.length.toString(),
+                'x-goog-content-length-range': `0,${file.length}`,
+                'Authorization': `Bearer ${idToken}`
+            },
+            body: file
+        });
+
+        if (!response.ok) {
+            throw new Error(`Upload failed: ${response.statusText}`);
+        }
+
+        return response;
+    } catch (error) {
+        console.error('Upload error:', error);
+        throw error;
+    }
+}
+
+// const uploadUrl = "https://storage.googleapis.com/upload/storage/v1/b/tcgprinter-81fb5.firebasestorage.app/o?name=print-images%2F0O6GO5lrAgcTGKiTC3JY%2Fcc7d5d55-e657-4cb4-8623-fadb73f7be2a&uploadType=resumable&upload_id=ABgVH88ZgxP3GDZMVl9YneG4pV8ube7un2gFYaB2OAB4pN7aDTgXFc4UlmMg91inG2yYqfBEq7ymNnjtA1IvyzphEZryYuGr9uYFPq6MSG8EQA";
+const imageId = "1";
+const orderId = "0O6GO5lrAgcTGKiTC3JY";
+const idToken = await getIdToken('ryanallenmoe@gmail.com', '');
+console.log("ID TOKEN", idToken);
+const uploadUrlResponse = await getUploadUrl({"imageId": "1", "imageType": "png"}, orderId, idToken);
+const uploadUrl = uploadUrlResponse.uploadUrls[imageId];
+console.log("UPLOAD URL", uploadUrl);
+const file = fs.readFileSync('/Users/ryan.moe1/Desktop/card_images/swamp-dragon.png');
+
+await uploadImage(file, uploadUrl, idToken);
+
+// Properly handle the Promise
+// getIdToken('ryanallenmoe@gmail.com', '')
+//     .then(token => {
+//         console.log('ID Token:', token);
+//     })
+//     .catch(error => {
+//         console.error('Error getting token:', error.message);
+//     });

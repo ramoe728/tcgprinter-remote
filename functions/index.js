@@ -481,37 +481,48 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         // Generate upload URLs for each image
         const bucket = storage.bucket();
         console.log('Storage bucket:', bucket.name);
+
+        // Set CORS configuration on the bucket
+        await bucket.setCorsConfiguration([
+            {
+                origin: ['https://tcgprinter.com', 'https://tcgprinterhosting.web.app'],
+                method: ['PUT', 'GET', 'HEAD', 'POST', 'OPTIONS'],
+                responseHeader: ['Content-Type', 'Access-Control-Allow-Origin', 'Content-Length', 'Content-Range', 'x-goog-content-length-range'],
+                maxAgeSeconds: 3600
+            }
+        ]);
         
         const uploadUrls = {};
 
-        await Promise.all(imageIds.map(async (imageId) => {
+        await Promise.all(imageIds.map(async (imgObj) => {
+            const imageId = imgObj.imageId;
+            const imageType = imgObj.imageType || 'png'; // default to png if not provided
             const filePath = `print-images/${orderId}/${imageId}`;
             const file = bucket.file(filePath);
-            console.log('Creating upload URL for:', filePath);
+            console.log('Creating upload URL for:', filePath, 'with type:', imageType);
+
+            // Map imageType to MIME type
+            let mimeType = 'application/octet-stream';
+            if (imageType === 'png') mimeType = 'image/png';
+            else if (imageType === 'jpg' || imageType === 'jpeg') mimeType = 'image/jpeg';
+            else if (imageType === 'gif') mimeType = 'image/gif';
+            // Add more types as needed
 
             try {
                 // Create a reference in Firestore first
                 await orderRef.collection('image-refs').doc(imageId).set({
                     storageRef: filePath,
                     uploadStatus: 'pending',
-                    createdAt: FieldValue.serverTimestamp()
+                    createdAt: FieldValue.serverTimestamp(),
+                    imageType: imageType
                 });
 
-                // Get a resumable upload URL
+                // Get a resumable upload URL with the correct content type
                 const [url] = await file.createResumableUpload({
                     metadata: {
-                        contentType: 'application/octet-stream',
+                        contentType: mimeType,
                     },
-                    origin: ['https://tcgprinter.com', 'https://tcgprinterhosting.web.app'],
-                    resumable: true,
-                    cors: [
-                        {
-                            origin: ['https://tcgprinter.com', 'https://tcgprinterhosting.web.app'],
-                            method: ['PUT', 'GET', 'HEAD'],
-                            responseHeader: ['Content-Type', 'Access-Control-Allow-Origin'],
-                            maxAgeSeconds: 3600
-                        }
-                    ]
+                    resumable: true
                 });
 
                 console.log('Successfully created upload URL for:', filePath);

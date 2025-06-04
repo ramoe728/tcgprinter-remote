@@ -2,7 +2,8 @@
   "type": "module",
   "dependencies": {
     "dotenv": "^16.5.0",
-    "firebase": "^11.6.1"
+    "firebase": "^11.6.1",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
     "node": "22"
