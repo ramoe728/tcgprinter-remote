@@ -43,14 +43,14 @@ async function getIdToken(email, password) {
     }
 }
 
-async function getUploadUrl(imageId, orderId, idToken) {
+async function getUploadUrl(imageObject, orderId, idToken) {
     const response = await fetch(`https://us-central1-tcgprinter-81fb5.cloudfunctions.net/api/get-upload-urls`, {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${idToken}`,
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ imageIds: [imageId], orderId })
+        body: JSON.stringify({ imageObjects: [imageObject], orderId })
     });
 
     return response.json();
@@ -81,11 +81,12 @@ async function uploadImage(file, uploadUrl, idToken) {
 }
 
 // const uploadUrl = "https://storage.googleapis.com/upload/storage/v1/b/tcgprinter-81fb5.firebasestorage.app/o?name=print-images%2F0O6GO5lrAgcTGKiTC3JY%2Fcc7d5d55-e657-4cb4-8623-fadb73f7be2a&uploadType=resumable&upload_id=ABgVH88ZgxP3GDZMVl9YneG4pV8ube7un2gFYaB2OAB4pN7aDTgXFc4UlmMg91inG2yYqfBEq7ymNnjtA1IvyzphEZryYuGr9uYFPq6MSG8EQA";
-const imageId = "1";
+const imageId = "2";
 const orderId = "0O6GO5lrAgcTGKiTC3JY";
 const idToken = await getIdToken('ryanallenmoe@gmail.com', '');
 console.log("ID TOKEN", idToken);
-const uploadUrlResponse = await getUploadUrl({"imageId": "1", "imageType": "png"}, orderId, idToken);
+const uploadUrlResponse = await getUploadUrl({"imageId": imageId, "imageType": "png"}, orderId, idToken);
+console.log("UPLOAD URL RESPONSE", uploadUrlResponse);
 const uploadUrl = uploadUrlResponse.uploadUrls[imageId];
 console.log("UPLOAD URL", uploadUrl);
 const file = fs.readFileSync('/Users/ryan.moe1/Desktop/card_images/swamp-dragon.png');

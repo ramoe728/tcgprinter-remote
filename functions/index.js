@@ -455,8 +455,8 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
 // Add-order-to-queue is expected to be called first in order to have an orderId
 app.post("/get-upload-urls", authenticate, async (req, res) => {
     try {
-        const { imageIds, orderId } = req.body;
-        if (!imageIds || !Array.isArray(imageIds) || !orderId) {
+        const { imageObjects, orderId } = req.body;
+        if (!imageObjects || !Array.isArray(imageObjects) || !orderId) {
             return res.status(400).json({ error: "Invalid request" });
         }
 
@@ -494,7 +494,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         
         const uploadUrls = {};
 
-        await Promise.all(imageIds.map(async (imgObj) => {
+        await Promise.all(imageObjects.map(async (imgObj) => {
             const imageId = imgObj.imageId;
             const imageType = imgObj.imageType || 'png'; // default to png if not provided
             const filePath = `print-images/${orderId}/${imageId}`;
