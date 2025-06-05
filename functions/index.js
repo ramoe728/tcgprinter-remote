@@ -257,9 +257,10 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
             payment_method_types: ['card'],
             ui_mode: 'embedded',
             mode: 'payment',
+            automatic_tax: { enabled: true },
             line_items: [
                 {
-                    price: 'price_1RQWyMLWCAaLY4PACFj7HV7G', // this is the price id for a card in stripe
+                    price: 'price_1RWj7hLWCAaLY4PAKasTCkUO', // this is the price id for a card in stripe
                     quantity: cardCount
                 },
                 {
@@ -274,7 +275,7 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
                     quantity: 1,
                     },
             ],
-            return_url: 'https://tcgprinter.com/building'
+            return_url: 'https://tcgprinter.com/success?session_id={CHECKOUT_SESSION_ID} '
         })
     
         res.send({ clientSecret: session.client_secret });
