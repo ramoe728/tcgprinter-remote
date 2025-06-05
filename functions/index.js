@@ -517,12 +517,12 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
                     imageType: imageType
                 });
 
-                // Get a resumable upload URL with the correct content type
-                const [url] = await file.createResumableUpload({
-                    metadata: {
-                        contentType: mimeType,
-                    },
-                    resumable: true
+                // Get a signed URL instead of resumable upload
+                const [url] = await file.getSignedUrl({
+                    version: 'v4',
+                    action: 'write',
+                    expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+                    contentType: mimeType
                 });
 
                 console.log('Successfully created upload URL for:', filePath);
