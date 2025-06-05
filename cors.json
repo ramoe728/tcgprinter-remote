@@ -1,14 +1,26 @@
 [
-    {
-      "origin": ["https://tcgprinter.com", "https://tcgprinterhosting.web.app"],
-      "method": ["GET", "HEAD", "PUT", "POST", "OPTIONS"],
-      "responseHeader": [
-        "Content-Type",
-        "Access-Control-Allow-Origin",
-        "Content-Length",
-        "Content-Range",
-        "x-goog-content-length-range"
-      ],
-      "maxAgeSeconds": 3600
-    }
-  ]
+  {
+    "origin": [
+      "https://tcgprinter.com",
+      "https://tcgprinterhosting.web.app"
+    ],
+    "method": [
+      "GET",
+      "HEAD",
+      "PUT",
+      "POST",
+      "OPTIONS"
+    ],
+    "responseHeader": [
+      "Content-Type",
+      "Access-Control-Allow-Origin",
+      "Access-Control-Allow-Headers",
+      "Access-Control-Allow-Methods",
+      "Content-Length",
+      "Content-Range",
+      "x-goog-content-length-range",
+      "Authorization"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
