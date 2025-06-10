@@ -123,7 +123,7 @@ const stripe_key = defineSecret("STRIPE_P_KEY")
 let stripe = null;
 async function getStripe() {
     if (!stripe) {
-        
+
         stripe = new Stripe(process.env.STRIPE_P_KEY);
     }
     return stripe;
@@ -244,12 +244,12 @@ const requireRole = (role) => {
 
 app.post('/create-payment-intent', authenticate, async (req, res) => {
     const { cardCount } = req.body;
-    const {deliveryMethod} = req.body
+    const { deliveryMethod } = req.body
     const numBoxes = Math.ceil(cardCount / 125);
     const box_packaging_cost = 120
     const packaging_total = numBoxes * box_packaging_cost
     const flat_rate_shipping_cost = 1000
-    const shippingPackagingTotal = flat_rate_shipping_cost + packaging_total ;
+    const shippingPackagingTotal = flat_rate_shipping_cost + packaging_total;
 
     try {
         const stripeInstance = await getStripe();
@@ -268,16 +268,16 @@ app.post('/create-payment-intent', authenticate, async (req, res) => {
                     price_data: {
                         currency: 'usd',
                         product_data: {
-                        name: 'Shipping & Packaging',
+                            name: 'Shipping & Packaging',
                         },
-                        unit_amount: deliveryMethod == 'shipping' ? shippingPackagingTotal: packaging_total,
+                        unit_amount: deliveryMethod == 'shipping' ? shippingPackagingTotal : packaging_total,
                     },
                     quantity: 1,
-                    },
+                },
             ],
             return_url: 'https://tcgprinter.com/success?session_id={CHECKOUT_SESSION_ID} '
         })
-    
+
         res.send({ clientSecret: session.client_secret });
     } catch (error) {
         console.log(error.message)
@@ -376,14 +376,12 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
 
         // Generate IDs for the order and queue entry
         const orderId = db.collection('print-orders').doc().id;
-        const queueId = db.collection('print-queue').doc().id;
 
         // Create a new order document
         const orderRef = db.collection('print-orders').doc(orderId);
 
         console.log('Order metadata:', orderMetadata);
         console.log('orderId:', orderId);
-        console.log('queueId:', queueId);
         console.log('orderRef:', orderRef);
 
         // Store the order metadata in the users collection {userId}/orders/{orderId}
@@ -417,27 +415,14 @@ app.post("/add-order-to-queue", authenticate, async (req, res) => {
             ...orderMetadata
         });
 
-        // Save the queue entry - this is what the print service will look for
-        const queueRef = db.collection('print-queue').doc(queueId);
-        batch.set(queueRef, {
-            orderId: orderId,
-            userId: req.user.uid,
-            status: 'pending',
-            cardCount: imagePairs.length,
-            priority: orderMetadata?.priority || 5, // Default medium priority
-            createdAt: FieldValue.serverTimestamp()
-        });
-
         // Commit the batch write
         await batch.commit();
         console.log(`Saved order metadata, queue entry, and ${imagePairs.length} image pairs`);
 
         // Return success response
         res.status(201).json({
-            message: "Print order added to queue successfully",
+            message: "Print order added successfully",
             orderId,
-            queueId,
-            queuePosition: 0, // Will be updated by a background process
             imagePairCount: imagePairs.length,
         });
 
@@ -492,7 +477,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
                 maxAgeSeconds: 3600
             }
         ]);
-        
+
         const uploadUrls = {};
 
         await Promise.all(imageObjects.map(async (imgObj) => {
@@ -541,7 +526,7 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
         });
     } catch (error) {
         console.error("Error generating upload URLs:", error);
-        res.status(500).json({ 
+        res.status(500).json({
             error: error.message,
             details: "Please ensure the Firebase Storage bucket is properly configured and the service account has the necessary permissions."
         });
@@ -551,47 +536,102 @@ app.post("/get-upload-urls", authenticate, async (req, res) => {
 
 // Send order to print service. Can only be called by a founding user
 app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (req, res) => {
-    console.log("Print order requested");
-    res.status(200).json({ message: "Print order requested" });
+    try {
+        const { orderId } = req.params;
 
-    // try {
-    //     const { orderId } = req.params;
+        // Get order details
+        const orderDoc = await db.collection('print-orders').doc(orderId).get();
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: "Order not found" });
+        }
 
-    //     // Get order details
-    //     const orderDoc = await admin.firestore().collection('print-orders').doc(orderId).get();
+        const orderData = orderDoc.data();
+        const { imagePairs } = orderData;
 
-    //     if (!orderDoc.exists) {
-    //         return res.status(404).json({ error: "Order not found" });
-    //     }
+        // Generate signed URLs for all images (24-hour expiry for large jobs)
+        const bucket = storage.bucket();
+        const downloadUrls = {};
+        const imageMetadata = [];
 
-    //     // Get image pairs for the order
-    //     const imagePairsSnapshot = await orderDoc.ref.collection('image-pairs').get();
-    //     const imagePairs = [];
+        // Process front and back images
+        const allImages = [
+            ...imagePairs.front_images.map(id => ({ id, type: 'front' })),
+            ...imagePairs.back_images.map(id => ({ id, type: 'back' }))
+        ];
 
-    //     imagePairsSnapshot.forEach(doc => {
-    //         const data = doc.data();
-    //         imagePairs.push(...data.pairs);
-    //     });
+        await Promise.all(allImages.map(async (img) => {
+            const filePath = `print-images/${orderId}/${img.id}`;
+            const file = bucket.file(filePath);
 
-    //     res.status(200).json({
-    //         message: "Print order details retrieved successfully",
-    //         order: orderDoc.data(),
-    //         imagePairs
-    //     });
-    // } catch (error) {
-    //     console.error("Error retrieving print order:", error);
-    //     res.status(500).json({
-    //         error: "Failed to retrieve print order",
-    //         details: error.message
-    //     });
-    // }
+            try {
+                // Get file metadata for size info
+                const [metadata] = await file.getMetadata();
+
+                // Generate download URL (24 hours for large jobs)
+                const [url] = await file.getSignedUrl({
+                    version: 'v4',
+                    action: 'read',
+                    expires: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+                });
+
+                downloadUrls[img.id] = url;
+                imageMetadata.push({
+                    imageId: img.id,
+                    type: img.type,
+                    size: metadata.size,
+                    contentType: metadata.contentType
+                });
+            } catch (error) {
+                console.error(`Error processing image ${img.id}:`, error);
+                throw error;
+            }
+        }));
+
+        // Update order status
+        await orderDoc.ref.update({
+            status: 'ready-for-print',
+            printPreparedAt: FieldValue.serverTimestamp(),
+            downloadUrls,
+            imageMetadata
+        });
+
+        // Calculate total download size
+        const totalSize = imageMetadata.reduce((sum, img) => sum + parseInt(img.size), 0);
+
+        res.json({
+            orderId,
+            downloadUrls,
+            imageMetadata,
+            imagePairs: {
+                front_images: imagePairs.front_images,
+                back_images: imagePairs.back_images
+            },
+            totalImages: allImages.length,
+            totalSizeBytes: totalSize,
+            totalSizeMB: Math.round(totalSize / (1024 * 1024)),
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            orderMetadata: {
+                cardCount: orderData.cardCount,
+                userId: orderData.userId,
+                createdAt: orderData.createdAt,
+                ...orderData.orderMetadata
+            }
+        });
+
+    } catch (error) {
+        console.error("Error preparing print job:", error);
+        res.status(500).json({
+            error: "Failed to prepare print job",
+            details: error.message
+        });
+    }
 });
 
 // Get all orders with a specific status (founders only)
 app.get("/get-all-orders/:orderStatus", requireRole('founder'), authenticate, async (req, res) => {
     try {
         const { orderStatus } = req.params;
-        let query = db.collection('print-queue');
+        let query = db.collection('print-orders');
 
         // Filter by status since it's provided in this route
         query = query.where('status', '==', orderStatus);
@@ -637,7 +677,7 @@ app.get("/get-all-orders/:orderStatus", requireRole('founder'), authenticate, as
 app.get("/get-all-orders", requireRole('founder'), authenticate, async (req, res) => {
     try {
         // Query all orders without status filter
-        const snapshot = await db.collection('print-queue').get();
+        const snapshot = await db.collection('print-orders').get();
 
         if (snapshot.empty) {
             return res.status(200).json({
