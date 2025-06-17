@@ -24,6 +24,7 @@ import cors from "cors";
 import dotenv from 'dotenv';
 import { Stripe } from 'stripe';
 import { defineSecret } from "firebase-functions/params";
+import crypto from 'crypto';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -120,15 +121,52 @@ app.use(express.json());
 
 // Initialize Stripe - lazy initialization
 const stripe_key = defineSecret("STRIPE_P_KEY")
+const print_server_api_key = defineSecret("PRINT_SERVER_API_KEY")
 let stripe = null;
 async function getStripe() {
     if (!stripe) {
-
+        
         stripe = new Stripe(process.env.STRIPE_P_KEY);
     }
     return stripe;
 }
 
+// HMAC Authentication Functions
+function signRequest(body, apiKey) {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const bodyString = JSON.stringify(body);
+    const payload = bodyString + timestamp;
+    const signature = crypto
+        .createHmac('sha256', apiKey)
+        .update(payload)
+        .digest('hex');
+    
+    return { signature, timestamp };
+}
+
+function verifySignature(body, signature, timestamp, apiKey) {
+    // Check timestamp (reject requests older than 5 minutes)
+    const now = Math.floor(Date.now() / 1000);
+    const requestTime = parseInt(timestamp);
+    
+    if (isNaN(requestTime) || Math.abs(now - requestTime) > 300) {
+        return false;
+    }
+    
+    // Verify signature
+    const bodyString = JSON.stringify(body);
+    const payload = bodyString + timestamp;
+    const expectedSignature = crypto
+        .createHmac('sha256', apiKey)
+        .update(payload)
+        .digest('hex');
+    
+    // Use timing-safe comparison
+    return crypto.timingSafeEqual(
+        Buffer.from(signature, 'hex'), 
+        Buffer.from(expectedSignature, 'hex')
+    );
+}
 
 // Add a test endpoint to verify configuration
 app.get("/test-config", async (req, res) => {
@@ -587,18 +625,11 @@ app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (r
             }
         }));
 
-        // Update order status
-        await orderDoc.ref.update({
-            status: 'ready-for-print',
-            printPreparedAt: FieldValue.serverTimestamp(),
-            downloadUrls,
-            imageMetadata
-        });
-
         // Calculate total download size
         const totalSize = imageMetadata.reduce((sum, img) => sum + parseInt(img.size), 0);
 
-        res.json({
+        // Prepare order data for print server
+        const printOrderData = {
             orderId,
             downloadUrls,
             imageMetadata,
@@ -616,6 +647,32 @@ app.post("/print-order/:orderId", requireRole('founder'), authenticate, async (r
                 createdAt: orderData.createdAt,
                 ...orderData.orderMetadata
             }
+        };
+
+        // Store the print order in the print-queue collection
+        const queueRef = db.collection('print-queue').doc(orderId);
+        await queueRef.set({
+            ...printOrderData,
+            status: 'pending',
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp()
+        });
+
+        // Update the original order status
+        await orderDoc.ref.update({
+            status: 'queued-for-print',
+            printPreparedAt: FieldValue.serverTimestamp(),
+            downloadUrls,
+            imageMetadata
+        });
+
+        // Return success response to frontend
+        res.json({
+            message: "Print order queued successfully",
+            orderId,
+            status: "queued-for-print",
+            totalImages: allImages.length,
+            totalSizeMB: Math.round(totalSize / (1024 * 1024))
         });
 
     } catch (error) {
@@ -713,5 +770,73 @@ app.get("/get-all-orders", requireRole('founder'), authenticate, async (req, res
     }
 });
 
-export const api = onRequest({ secrets: [stripe_key] }, app);
+// Update print status endpoint (called by print server)
+app.post("/update-print-status/:orderId", async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        const { status, completedAt, error } = req.body;
+        
+        // Verify HMAC signature
+        const signature = req.headers['x-signature'];
+        const timestamp = req.headers['x-timestamp'];
+        
+        if (!signature || !timestamp) {
+            console.log('Missing signature or timestamp in print status update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Missing signature or timestamp' 
+            });
+        }
+        
+        const apiKey = process.env.PRINT_SERVER_API_KEY;
+        if (!verifySignature(req.body, signature, timestamp, apiKey)) {
+            console.log('Invalid signature in print status update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Invalid signature' 
+            });
+        }
+
+        // Update order in print-orders collection
+        const orderRef = db.collection('print-orders').doc(orderId);
+        const updateData = {
+            status: status,
+            updatedAt: FieldValue.serverTimestamp()
+        };
+
+        if (completedAt) {
+            updateData.completedAt = new Date(completedAt);
+        }
+
+        if (error) {
+            updateData.printError = error;
+        }
+
+        await orderRef.update(updateData);
+
+        // Also update the print-queue entry
+        const queueQuery = await db.collection('print-queue').where('orderId', '==', orderId).get();
+        if (!queueQuery.empty) {
+            const queueDoc = queueQuery.docs[0];
+            await queueDoc.ref.update(updateData);
+        }
+
+        console.log(`Updated order ${orderId} status to ${status}`);
+
+        res.json({
+            message: `Order ${orderId} status updated to ${status}`,
+            orderId,
+            status
+        });
+
+    } catch (error) {
+        console.error("Error updating print status:", error);
+        res.status(500).json({
+            error: "Failed to update print status",
+            details: error.message
+        });
+    }
+});
+
+export const api = onRequest({ secrets: [stripe_key, print_server_api_key] }, app);
 
