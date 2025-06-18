@@ -838,5 +838,114 @@ app.post("/update-print-status/:orderId", async (req, res) => {
     }
 });
 
+// Update order status endpoint (called by frontend client)
+app.post("/update-order-status", authenticate, async (req, res) => {
+    try {
+        const { orderId, status } = req.body;
+
+        if (!orderId || !status) {
+            return res.status(400).json({
+                error: "Missing required fields",
+                details: "orderId and status are required"
+            });
+        }
+
+        // Define allowed status transitions for security
+        const allowedStatuses = [
+            'pending',
+            'uploading', 
+            'ready-to-print',
+            'printing',
+            'completed',
+            'cancelled',
+            'failed'
+        ];
+
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({
+                error: "Invalid status",
+                details: `Status must be one of: ${allowedStatuses.join(', ')}`
+            });
+        }
+
+        // Get the order document
+        const orderRef = db.collection('print-orders').doc(orderId);
+        const orderDoc = await orderRef.get();
+
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: "Order not found" });
+        }
+
+        const orderData = orderDoc.data();
+
+        // Check if user owns this order or has admin privileges
+        const userDoc = await db.collection('users').doc(req.user.uid).get();
+        const userData = userDoc.data();
+        const userRole = userData?.role || 'user';
+        const isOwner = orderData.userId === req.user.uid;
+        const isAdmin = ['admin', 'founder'].includes(userRole);
+
+        if (!isOwner && !isAdmin) {
+            return res.status(403).json({
+                error: "Forbidden",
+                message: "You can only update your own orders"
+            });
+        }
+
+        // Update the order status
+        const updateData = {
+            status: status,
+            updatedAt: FieldValue.serverTimestamp()
+        };
+
+        // Add completion timestamp if status is completed
+        if (status === 'completed') {
+            updateData.completedAt = FieldValue.serverTimestamp();
+        }
+
+        await orderRef.update(updateData);
+
+        // Also update the user's order copy if it exists
+        try {
+            const userOrderRef = db.collection('users').doc(orderData.userId).collection('orders').doc(orderId);
+            const userOrderDoc = await userOrderRef.get();
+            if (userOrderDoc.exists) {
+                await userOrderRef.update(updateData);
+            }
+        } catch (userOrderError) {
+            console.warn(`Could not update user order copy: ${userOrderError.message}`);
+            // Don't fail the main update if user order copy fails
+        }
+
+        // Also update print-queue if it exists
+        try {
+            const queueQuery = await db.collection('print-queue').where('orderId', '==', orderId).get();
+            if (!queueQuery.empty) {
+                const queueDoc = queueQuery.docs[0];
+                await queueDoc.ref.update(updateData);
+            }
+        } catch (queueError) {
+            console.warn(`Could not update print queue: ${queueError.message}`);
+            // Don't fail the main update if queue update fails
+        }
+
+        console.log(`Order ${orderId} status updated to ${status} by user ${req.user.uid}`);
+
+        res.json({
+            message: `Order status updated successfully`,
+            orderId,
+            status,
+            updatedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error("Error updating order status:", error);
+        res.status(500).json({
+            error: "Failed to update order status",
+            details: error.message
+        });
+    }
+});
+
 export const api = onRequest({ secrets: [stripe_key, print_server_api_key] }, app);
 
