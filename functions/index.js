@@ -856,6 +856,7 @@ app.post("/update-order-status", authenticate, async (req, res) => {
             'uploading', 
             'ready-to-print',
             'printing',
+            'ready-to-print-backs',
             'completed',
             'cancelled',
             'failed'
