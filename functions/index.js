@@ -948,5 +948,250 @@ app.post("/update-order-status", authenticate, async (req, res) => {
     }
 });
 
+// Update print queue status endpoint (called by RPi print server)
+app.post("/update-print-order-status", async (req, res) => {
+    try {
+        const { orderId, status, completedAt, error: printError, progress } = req.body;
+        
+        // Verify HMAC signature
+        const signature = req.headers['x-signature'];
+        const timestamp = req.headers['x-timestamp'];
+        
+        if (!signature || !timestamp) {
+            console.log('Missing signature or timestamp in print status update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Missing signature or timestamp' 
+            });
+        }
+        
+        const apiKey = process.env.PRINT_SERVER_API_KEY;
+        if (!verifySignature(req.body, signature, timestamp, apiKey)) {
+            console.log('Invalid signature in print status update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Invalid signature' 
+            });
+        }
+
+        if (!orderId || !status) {
+            return res.status(400).json({
+                error: "Missing required fields",
+                details: "orderId and status are required"
+            });
+        }
+
+        // Define allowed statuses for print server
+        const allowedStatuses = [
+            'pending',
+            'processing',
+            'downloading',
+            'ready-to-print',
+            'printing',
+            'ready-to-print-backs',
+            'completed',
+            'failed'
+        ];
+
+        if (!allowedStatuses.includes(status)) {
+            return res.status(400).json({
+                error: "Invalid status",
+                details: `Status must be one of: ${allowedStatuses.join(', ')}`
+            });
+        }
+
+        // Prepare update data
+        const updateData = {
+            status: status,
+            updatedAt: FieldValue.serverTimestamp()
+        };
+
+        if (completedAt) {
+            updateData.completedAt = new Date(completedAt);
+        }
+
+        if (printError) {
+            updateData.printError = printError;
+        }
+
+        if (progress) {
+            updateData.progress = progress;
+        }
+
+        // Update print-orders document
+        const orderRef = db.collection('print-orders').doc(orderId);
+        const orderDoc = await orderRef.get();
+
+        if (!orderDoc.exists) {
+            return res.status(404).json({ error: "Print order not found" });
+        }
+
+        await orderRef.update(updateData);
+        console.log(`Updated print-orders ${orderId} status to ${status}`);
+
+        // Also update the user's order copy if it exists
+        try {
+            const orderData = orderDoc.data();
+            const userOrderRef = db.collection('users').doc(orderData.userId).collection('orders').doc(orderId);
+            const userOrderDoc = await userOrderRef.get();
+            if (userOrderDoc.exists) {
+                await userOrderRef.update(updateData);
+                console.log(`Updated user order copy ${orderId} status to ${status}`);
+            }
+        } catch (userOrderError) {
+            console.warn(`Could not update user order copy: ${userOrderError.message}`);
+            // Don't fail the main update if user order copy fails
+        }
+
+        res.json({
+            message: `Print order status updated successfully`,
+            orderId,
+            status,
+            updatedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error("Error updating print order status:", error);
+        res.status(500).json({
+            error: "Failed to update print order status",
+            details: error.message
+        });
+    }
+});
+
+// Update print queue item endpoint (called by RPi print server)
+app.post("/update-print-queue-item", async (req, res) => {
+    try {
+        const { orderId, updateData } = req.body;
+        
+        // Verify HMAC signature
+        const signature = req.headers['x-signature'];
+        const timestamp = req.headers['x-timestamp'];
+        
+        if (!signature || !timestamp) {
+            console.log('Missing signature or timestamp in print queue update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Missing signature or timestamp' 
+            });
+        }
+        
+        const apiKey = process.env.PRINT_SERVER_API_KEY;
+        if (!verifySignature(req.body, signature, timestamp, apiKey)) {
+            console.log('Invalid signature in print queue update');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Invalid signature' 
+            });
+        }
+
+        if (!orderId || !updateData || typeof updateData !== 'object') {
+            return res.status(400).json({
+                error: "Missing required fields",
+                details: "orderId and updateData (object) are required"
+            });
+        }
+
+        // Prevent updating certain protected fields directly
+        const protectedFields = ['orderId', 'createdAt'];
+        const filteredUpdateData = { ...updateData };
+        
+        protectedFields.forEach(field => {
+            if (filteredUpdateData.hasOwnProperty(field)) {
+                delete filteredUpdateData[field];
+                console.warn(`Removed protected field '${field}' from update data`);
+            }
+        });
+
+        // Always add updatedAt timestamp
+        filteredUpdateData.updatedAt = FieldValue.serverTimestamp();
+
+        // Convert date strings to Date objects for specific fields
+        const dateFields = ['completedAt', 'startedAt', 'processingStartedAt'];
+        dateFields.forEach(field => {
+            if (filteredUpdateData[field] && typeof filteredUpdateData[field] === 'string') {
+                try {
+                    filteredUpdateData[field] = new Date(filteredUpdateData[field]);
+                } catch (dateError) {
+                    console.warn(`Invalid date format for field '${field}': ${filteredUpdateData[field]}`);
+                    delete filteredUpdateData[field];
+                }
+            }
+        });
+
+        // Update print-queue document
+        const queueRef = db.collection('print-queue').doc(orderId);
+        const queueDoc = await queueRef.get();
+
+        if (!queueDoc.exists) {
+            return res.status(404).json({ error: "Print queue item not found" });
+        }
+
+        await queueRef.update(filteredUpdateData);
+        console.log(`Updated print-queue ${orderId} with data:`, JSON.stringify(filteredUpdateData, null, 2));
+
+        res.json({
+            message: `Print queue item updated successfully`,
+            orderId,
+            updatedFields: Object.keys(filteredUpdateData),
+            updatedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error("Error updating print queue item:", error);
+        res.status(500).json({
+            error: "Failed to update print queue item",
+            details: error.message
+        });
+    }
+});
+
+app.post("/print-backs/:orderId", requireRole('founder'), authenticate, async (req, res) => {
+    try {
+        const { orderId } = req.params;
+
+        if (!orderId) {
+            return res.status(400).json({
+                error: "Missing required fields",
+                details: "orderId is required"
+            });
+        }
+
+        // Find the document in print-queue collection
+        const queueRef = db.collection('print-queue').doc(orderId);
+        const queueDoc = await queueRef.get();
+
+        if (!queueDoc.exists) {
+            return res.status(404).json({ 
+                error: "Print queue item not found",
+                details: `No print queue document found with orderId: ${orderId}`
+            });
+        }
+
+        // Update the document with backReady field
+        const updateData = {
+            backReady: true,
+            updatedAt: FieldValue.serverTimestamp()
+        };
+
+        await queueRef.update(updateData);
+        console.log(`Set backReady to true for order ${orderId}`);
+
+        res.json({
+            message: "Print backs status updated successfully",
+            orderId,
+            backReady: true,
+            updatedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error("Error printing backs:", error);
+        res.status(500).json({
+            error: "Failed to update print backs status",
+            details: error.message
+        });
+    }
+});
+
 export const api = onRequest({ secrets: [stripe_key, print_server_api_key] }, app);
 
