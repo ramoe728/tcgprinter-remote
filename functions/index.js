@@ -125,7 +125,7 @@ const print_server_api_key = defineSecret("PRINT_SERVER_API_KEY")
 let stripe = null;
 async function getStripe() {
     if (!stripe) {
-        
+
         stripe = new Stripe(process.env.STRIPE_P_KEY);
     }
     return stripe;
